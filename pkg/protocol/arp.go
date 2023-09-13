@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"bytes"
+	"context"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	manuf "github.com/timest/gomanuf"
@@ -24,11 +25,11 @@ type ArpProtocol struct {
 	srcMac   []byte
 }
 
-func (s *ArpProtocol) BuildSendPacket(srcIp, srcMac []byte, dstIps []net.IP) <-chan []byte {
+func (s *ArpProtocol) BuildSendPacket(ctx context.Context, srcIp, srcMac []byte, dstIps []net.IP) <-chan []byte {
 	var sendCh = make(chan []byte)
 	s.srcIp = srcIp
 	s.srcMac = srcMac
-
+	_, cancel := context.WithCancel(ctx)
 	go func(sendCh chan []byte) {
 		var (
 			opt    gopacket.SerializeOptions
@@ -74,6 +75,7 @@ func (s *ArpProtocol) BuildSendPacket(srcIp, srcMac []byte, dstIps []net.IP) <-c
 			s.ArpMap[dstIp.String()] = true
 			ylog.WithField("command", "arp").Debugf("%s packet buffer is ok", dstIp.String())
 		}
+		cancel()
 	}(sendCh)
 
 	return sendCh

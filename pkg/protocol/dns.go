@@ -8,9 +8,9 @@ import (
 	"net"
 )
 
-type DnsOptionFunc func(protocol *DnsProtocol)
+type DnsOptionFunc[T any] func(protocol *DnsProtocol[T])
 
-func WithDnsResolvers(ips ...string) DnsOptionFunc {
+func WithDnsResolvers[T any](ips ...string) DnsOptionFunc[T] {
 	resolvers := []string{
 		"223.5.5.5",
 		"223.6.6.6",
@@ -21,13 +21,13 @@ func WithDnsResolvers(ips ...string) DnsOptionFunc {
 	var rs = make([]string, 0, len(resolvers)+len(ips))
 	rs = append(rs, resolvers...)
 	rs = append(rs, ips...)
-	return func(protocol *DnsProtocol) {
+	return func(protocol *DnsProtocol[T]) {
 		protocol.DnsResolvers = rs
 	}
 }
 
-func NewDnsProtocol(c context.Context, cancel context.CancelFunc, srcPort int, optionFunc ...DnsOptionFunc) *DnsProtocol {
-	var p = &DnsProtocol{
+func NewDnsProtocol[T any](c context.Context, cancel context.CancelFunc, srcPort int, optionFunc ...DnsOptionFunc[T]) *DnsProtocol[T] {
+	var p = &DnsProtocol[T]{
 		Ctx:          c,
 		Cancel:       cancel,
 		Cache:        map[string]DnsInfo{},
@@ -42,7 +42,9 @@ func NewDnsProtocol(c context.Context, cancel context.CancelFunc, srcPort int, o
 	return p
 }
 
-type DnsProtocol struct {
+type DnsProtocol[T any] struct {
+	BaseProtocol
+	hostCh       chan T
 	DnsResolvers []string
 	Cache        map[string]DnsInfo
 	DnsTable     chan DnsInfo
@@ -51,7 +53,7 @@ type DnsProtocol struct {
 	SrcPort      int
 }
 
-func (s *DnsProtocol) BuildSendPacket(srcIp, srcMac []byte, dstMac net.HardwareAddr, hosts [][]byte) <-chan []byte {
+func (s *DnsProtocol[T]) BuildSendPacket() <-chan []byte {
 	var sendCh = make(chan []byte)
 
 	go func(sendCh chan []byte) {
@@ -66,9 +68,7 @@ func (s *DnsProtocol) BuildSendPacket(srcIp, srcMac []byte, dstMac net.HardwareA
 		)
 		defer close(sendCh)
 
-		eth.SrcMAC = srcMac
-		eth.DstMAC = dstMac
-		eth.EthernetType = layers.EthernetTypeIPv4
+		eth = s.BaseProtocol.Ethernet()
 
 		// 构建 ip 报
 		ip.Version = 4 // ip 版本
@@ -81,7 +81,7 @@ func (s *DnsProtocol) BuildSendPacket(srcIp, srcMac []byte, dstMac net.HardwareA
 		ip.FragOffset = 0
 		ip.TTL = 255
 		ip.Protocol = layers.IPProtocolUDP
-		ip.SrcIP = srcIp
+		ip.SrcIP = s.SrcMAC
 
 		udp.SrcPort = layers.UDPPort(s.SrcPort)
 		udp.DstPort = layers.UDPPort(53)
@@ -96,7 +96,7 @@ func (s *DnsProtocol) BuildSendPacket(srcIp, srcMac []byte, dstMac net.HardwareA
 		_ = udp.SetNetworkLayerForChecksum(ip)
 
 		buffer = gopacket.NewSerializeBuffer()
-		for _, host := range hosts {
+		for _, host := range s.hostCh {
 			dns.Questions = []layers.DNSQuestion{
 				{
 					Name:  host,
@@ -132,7 +132,7 @@ func (s *DnsProtocol) BuildSendPacket(srcIp, srcMac []byte, dstMac net.HardwareA
 	return sendCh
 }
 
-func (s *DnsProtocol) Parse(packet gopacket.Packet) bool {
+func (s *DnsProtocol[T]) Parse(packet gopacket.Packet) bool {
 	layer := packet.Layer(layers.LayerTypeDNS)
 	if layer == nil {
 		return false

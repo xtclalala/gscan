@@ -12,7 +12,7 @@ func NewRunner(options Options) *Runner {
 	return &Runner{
 		options:         options,
 		isRunning:       false,
-		ctx:             ctx,
+		Ctx:             ctx,
 		cancel:          cancel,
 		parseHandleFunc: make([]ParseHandle, 0, 5),
 	}
@@ -30,7 +30,7 @@ type Runner struct {
 	// flags
 	isRunning bool
 	// 控制结束
-	ctx    context.Context
+	Ctx    context.Context
 	cancel context.CancelFunc
 	// 包接收后的操作
 	parseHandleFunc []ParseHandle
@@ -99,7 +99,7 @@ func (s *Runner) Close() {
 
 // DoneCh Done chan
 func (s *Runner) DoneCh() {
-	s.ctx.Done()
+	s.cancel()
 }
 
 // RunSender 发包
@@ -113,7 +113,7 @@ func (s *Runner) RunSender() {
 			if err != nil {
 				ylog.WithField("command", "runner").Errorf(err.Error())
 			}
-		case <-s.ctx.Done():
+		case <-s.Ctx.Done():
 			ylog.WithField("command", "runner").Infof("sender is done")
 			return
 		}
@@ -130,7 +130,7 @@ func (s *Runner) RunReceive() {
 		select {
 		case r := <-s.receiveCh:
 			go s.receiveAfter(r)
-		case <-s.ctx.Done():
+		case <-s.Ctx.Done():
 			ylog.WithField("command", "runner").Infof("receive is done")
 			return
 		}

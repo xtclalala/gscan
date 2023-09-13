@@ -52,8 +52,6 @@ var probe = &cli.Command{
 			temps = append(temps, net.ParseIP(yIP.Int2Ip(ip)))
 		}
 
-		packetCh := arp.BuildSendPacket(srcIp, d.Mac, temps)
-
 		r := pkg.DefaultRunner()
 		if r.Err != nil {
 			ylog.WithField("command", "probe").Errorf(err.Error())
@@ -66,6 +64,7 @@ var probe = &cli.Command{
 
 		go r.RunSender()
 		go r.RunReceive()
+		packetCh := arp.BuildSendPacket(r.Ctx, srcIp, d.Mac, temps)
 
 		for packet := range packetCh {
 			r.PushPacket(packet)
@@ -78,7 +77,7 @@ var probe = &cli.Command{
 					"IP":      data.Ip,
 					"Mac":     data.Mac,
 					"Device":  data.M}).Infof("%s is done!", data.Ip)
-			case <-time.After(5 * time.Second):
+			case <-time.After(10 * time.Second):
 				ylog.WithField("command", "probe").Infof("timeout")
 				r.DoneCh()
 				r.Close()
