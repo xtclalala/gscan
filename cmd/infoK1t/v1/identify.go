@@ -1,11 +1,11 @@
 package main
 
 import (
-	"fmt"
 	"github.com/urfave/cli/v2"
+	"github.com/xtclalala/infoK1t/internal/output"
 	"github.com/xtclalala/infoK1t/pkg"
 	"github.com/xtclalala/infoK1t/pkg/device"
-	"github.com/xtclalala/ylog"
+	"go.uber.org/zap"
 )
 
 // 获取当前设备网络信息
@@ -14,22 +14,22 @@ var identify = &cli.Command{
 	Aliases: []string{"id"},
 	Usage:   "Gets the current device ident information",
 	Action: func(c *cli.Context) error {
-		var d *device.Device
-		d = pkg.DefaultDevice()
-
-		if d.Err != nil {
-			ylog.WithField("command", "identify").Errorf("device collect info is failed")
-			ylog.WithField("command", "identify").Debugf(d.Err.Error())
+		var (
+			device *device.Device
+			err    error
+		)
+		device, err = pkg.Identify()
+		if err != nil {
+			output.GetLogger().Error(device.Err.Error())
 			return nil
 		}
-
-		ylog.WithFields(map[string]string{
-			fmt.Sprintf("%-20s", "Pcap Name"):        d.PcapName,
-			fmt.Sprintf("%-20s", "Pcap Description"): d.PcapDescription,
-			fmt.Sprintf("%-20s", "IPv4"):             d.Ipv4.String(),
-			fmt.Sprintf("%-20s", "NetMask"):          d.IpMask.String(),
-			fmt.Sprintf("%-20s", "Mac"):              d.Mac.String(),
-		}).Infof("Finish")
+		output.GetLogger().Info("network info",
+			zap.String("Pcap Name", device.PcapName),
+			zap.String("Pcap Description", device.PcapDescription),
+			zap.String("IPv4", device.Ipv4.String()),
+			zap.String("NetMask", device.IpMask.String()),
+			zap.String("Mac", device.Mac.String()),
+		)
 		return nil
 	},
 }

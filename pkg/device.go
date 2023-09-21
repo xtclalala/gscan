@@ -2,6 +2,8 @@ package pkg
 
 import (
 	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
+	"github.com/xtclalala/infoK1t/internal/config"
 	"github.com/xtclalala/infoK1t/pkg/device"
 	"github.com/xtclalala/infoK1t/pkg/protocol"
 	"github.com/xtclalala/infoK1t/pkg/runner"
@@ -42,9 +44,13 @@ func GetGatewayMac() net.HardwareAddr {
 
 		srcIpInt, _ = yIP.Ip2int(d.Ipv4.To4().String())
 		maskSize, _ = d.IpMask.Size()
-		ipi, _ = yIP.GatewayIp(srcIpInt, maskSize)
+		ips, _ := yIP.Parse(srcIpInt, maskSize)
+		ipi = ips[config.GetOptions().Gateway]
 
-		packetCh := arp.BuildSendPacket(d.Ipv4.To4(), d.Mac, []net.IP{net.ParseIP(yIP.Int2Ip(ipi))})
+		packetCh := arp.BuildSendPacket(rr.Ctx, func(ap *protocol.ArpProtocol) {
+			ap.DstMAC, ap.SrcMAC, ap.EthernetType = net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, d.Mac, layers.EthernetTypeARP
+			ap.SrcIp, ap.DstIps = d.Ipv4.To4(), []net.IP{net.ParseIP(yIP.Int2Ip(ipi))}
+		})
 		rr.AppendParseHandle(func(packet gopacket.Packet) bool {
 			return arp.Parse(packet)
 		})
@@ -56,7 +62,6 @@ func GetGatewayMac() net.HardwareAddr {
 		data := <-arp.ArpTable
 		mac, _ = net.ParseMAC(data.Mac)
 
-		rr.DoneCh()
 	})
 	return mac
 }

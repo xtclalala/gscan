@@ -3,7 +3,6 @@ package device
 import (
 	"errors"
 	"github.com/google/gopacket/pcap"
-	"github.com/xtclalala/ylog"
 	"net"
 	"strings"
 )
@@ -34,11 +33,9 @@ func (s *Device) netInfo() {
 	defer conn.Close()
 	if err != nil {
 		s.Err = err
-		ylog.WithField("command", "device").Debugf(err.Error())
 		return
 	}
 	localAddr := conn.LocalAddr().(*net.UDPAddr)
-	ylog.WithField("command", "device").Debugf(localAddr.String())
 	s.Ipv4 = localAddr.IP.To4()
 	s.IpMask = localAddr.IP.DefaultMask()
 
@@ -55,13 +52,8 @@ func (s *Device) netInfo() {
 		if strings.HasPrefix(strings.ToLower(device.Name), "vmware") {
 			continue
 		}
-
-		//var addrs []net.Addr
-		_, err = device.Addrs()
-		if err != nil {
-			ylog.WithField("command", "device").Debugf(err.Error())
-			s.Err = err
-			return
+		if strings.HasPrefix(strings.ToLower(device.Name), "vethernet") {
+			continue
 		}
 
 		s.Mac = device.HardwareAddr
@@ -70,9 +62,8 @@ func (s *Device) netInfo() {
 		return
 
 	}
-	err = errors.New("can not find net devices")
+	err = errors.New("can't find net device")
 	s.Err = err
-	ylog.WithField("command", "device").Debugf(err.Error())
 }
 
 // 搜集网卡设备信息
@@ -87,7 +78,6 @@ func (s *Device) pcapInfo() {
 
 	devices, err = pcap.FindAllDevs()
 	if err != nil {
-		ylog.WithField("command", "device").Debugf(err.Error())
 		s.Err = err
 		return
 	}
@@ -104,7 +94,6 @@ func (s *Device) pcapInfo() {
 	}
 	err = errors.New("can not find pcap devices")
 	s.Err = err
-	ylog.WithField("command", "device").Debugf(err.Error())
 }
 
 func isUp(d net.Interface) bool {
@@ -113,15 +102,4 @@ func isUp(d net.Interface) bool {
 
 func isLoopback(d net.Interface) bool {
 	return d.Flags&net.FlagLoopback != 0
-}
-
-func getIpv4AndMask(addrs []net.Addr) (ip net.IP, mask *net.IPNet, err error) {
-	var temp net.Addr
-	if len(addrs) == 2 {
-		temp = addrs[1]
-	} else {
-		temp = addrs[0]
-	}
-	ip, mask, err = net.ParseCIDR(temp.String())
-	return
 }

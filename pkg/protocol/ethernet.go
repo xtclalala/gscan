@@ -2,13 +2,11 @@ package protocol
 
 import "github.com/google/gopacket/layers"
 
-type BaseProtocol struct {
-	SrcMAC       []byte
-	DstMAC       []byte
-	EthernetType layers.EthernetType
+type EthernetProtocol struct {
+	layers.Ethernet
 }
 
-func (s *BaseProtocol) Ethernet() *layers.Ethernet {
+func (s *EthernetProtocol) BuildEthernet() *layers.Ethernet {
 	return &layers.Ethernet{
 		SrcMAC:       s.SrcMAC,
 		DstMAC:       s.DstMAC,

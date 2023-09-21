@@ -1,17 +1,14 @@
 package main
 
 import (
-	"context"
 	"errors"
-	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/urfave/cli/v2"
+	"github.com/xtclalala/infoK1t/internal/config"
+	"github.com/xtclalala/infoK1t/internal/output"
 	"github.com/xtclalala/infoK1t/internal/timer"
 	"github.com/xtclalala/infoK1t/pkg"
-	"github.com/xtclalala/infoK1t/pkg/device"
-	"github.com/xtclalala/infoK1t/pkg/protocol"
-	"github.com/xtclalala/infoK1t/pkg/runner"
-	"github.com/xtclalala/ylog"
+	"go.uber.org/zap"
 	"net"
 	"strings"
 	"time"
@@ -25,112 +22,66 @@ var ping = &cli.Command{
 		&cli.StringFlag{
 			Name:    "target",
 			Aliases: []string{"t"},
-			Usage:   "target domain",
+			Usage:   "targets domain, use ',' split, explame:  baidu.com or baidu.com,bing.com,bilibili.com",
 			Value:   "",
 		},
 		&cli.StringFlag{
-			Name:    "targets",
-			Aliases: []string{"ts"},
-			Usage:   "targets domain, use ',' split domain, explame: xxxx,xxxx,xxxx",
+			Name:    "server",
+			Aliases: []string{"s"},
+			Usage:   "dns server, use ',' split, explame: 22.22.22.22 or 11.11.11.11,33.33.33.33",
 			Value:   "",
 		},
 	},
-	Before: func(c *cli.Context) error {
+	Action: func(c *cli.Context) error {
+		var (
+			target  string
+			targets []string
+
+			server  string
+			servers = []string{}
+		)
 		var err = errors.New("need target")
 		target = c.String("target")
-		if target != "" {
-			return nil
-		}
-		target = c.String("targets")
 		if target == "" {
 			return err
 		}
 		targets = strings.Split(target, ",")
-		return nil
-	},
-	Action: func(c *cli.Context) error {
-		// 获取网关 Mac 地址
-		mac := pkg.GetGatewayMac()
 
-		var (
-			dns       *protocol.DnsProtocol
-			icmp      *protocol.IcmpProtocol
-			d         *device.Device
-			r         *runner.Runner
-			err       error
-			arpCtx    context.Context
-			arpCancel context.CancelFunc
-			freePort  int
-			hosts     = make(map[string]bool)
-			ipCh      = make(chan []byte)
-			srcIp     []byte
-			ts        [][]byte
-		)
-		if target != "" {
-			ts = append(ts, []byte(target))
+		if c.String("server") != "" {
+			servers = strings.Split(server, ",")
 		}
 
-		for _, s := range targets {
-			ts = append(ts, []byte(s))
-		}
-
-		d = pkg.DefaultDevice()
-		freePort, err = pkg.GetFreePort()
-		if err != nil {
-			ylog.WithField("command", "ping").Errorf(err.Error())
-			return nil
-		}
-		srcIp = d.Ipv4.To4()
-		arpCtx, arpCancel = context.WithTimeout(context.Background(), 15*time.Second)
-		dns = protocol.NewDnsProtocol(arpCtx, arpCancel, freePort, protocol.WithDnsResolvers())
-
-		icmpCtx, icmpCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		icmp = protocol.NewIcmpProtocol(icmpCtx, icmpCancel, protocol.WithBufferNumber(15))
-
-		dnsPacketCh := dns.BuildSendPacket(srcIp, d.Mac, mac, ts)
-		icmpPacketCh := icmp.BuildSendPacket(srcIp, d.Mac, mac, ipCh)
-
-		r = pkg.DefaultRunner()
-		if r.Err != nil {
-			ylog.WithField("command", "ping").Errorf(err.Error())
-			return nil
-		}
-
-		r.AppendParseHandle(func(packet gopacket.Packet) bool {
-			return dns.Parse(packet)
-		})
-		r.AppendParseHandle(func(packet gopacket.Packet) bool {
-			return icmp.Parse(packet)
-		})
-
-		go r.RunSender()
-		go r.RunReceive()
-
-		f := func(r *runner.Runner, packetCh <-chan []byte) {
-			for packet := range packetCh {
-				r.PushPacket(packet)
-			}
-		}
 		icmpSend := func(ip []byte, ipCh chan []byte) {
 			ipCh <- ip
 		}
-
-		go f(r, dnsPacketCh)
-		go f(r, icmpPacketCh)
+		var (
+			ts    [][]byte
+			hosts = make(map[string]bool)
+		)
+		for _, t := range targets {
+			ts = append(ts, []byte(t))
+		}
+		r := pkg.DefaultRunner()
+		dns, icmp, err := pkg.Ping(ts, append(servers, config.GetOptions().Dns.Servers...))
+		if err != nil {
+			output.GetLogger().Error(err.Error())
+			return nil
+		}
 
 		for {
 			select {
 			case data := <-dns.DnsTable:
-				ylog.WithFields(map[string]string{
-					"command": "ping",
-					"Target":  data.Host,
-					"DnsType": data.DnsType.String(),
-					"Value":   data.Value,
-				}).Info("Finish")
+				output.GetLogger().Info("DNS",
+					zap.String("Target", data.Host),
+					zap.String("DnsType", data.DnsType.String()),
+					zap.String("Value", data.Value),
+					zap.String("Server", data.SrcIp.String()),
+				)
 				if data.DnsType == layers.DNSTypeA || data.DnsType == layers.DNSTypeAAAA {
+					// 去重
 					if _, ok := hosts[data.Value]; !ok {
-						timer.RunTime(context.Background(), 5, 1*time.Second, func() {
-							icmpSend(net.ParseIP(data.Value).To4(), ipCh)
+						timer.RunTime(r.Ctx, 5, 1*time.Second, func() {
+							icmpSend(net.ParseIP(data.Value).To4(), icmp.DstIpCh)
 						})
 						hosts[data.Value] = true
 						icmp.Add(5)
@@ -138,15 +89,17 @@ var ping = &cli.Command{
 
 				}
 			case data := <-icmp.IcmpTable:
-				ylog.WithFields(map[string]string{
-					"command": "ping",
-					"ICMP":    data.Target,
-					"TTL":     string(data.Ttl),
-					"Time":    data.Elapsed.String(),
-				}).Info("ICMP to DNS")
-			case <-icmpCtx.Done():
-				ylog.WithField("command", "ping").Infof("timeout")
-				r.DoneCh()
+				output.GetLogger().Info("ICMP",
+					zap.String("From", data.Target),
+					zap.Uint8("TTL", data.Ttl),
+					zap.String("Time", data.Elapsed.String()),
+				)
+			case <-time.After(10 * time.Second):
+				output.GetLogger().Info("timeout")
+				r.Close()
+				return nil
+			case <-icmp.Ctx.Done():
+				output.GetLogger().Info("is done")
 				r.Close()
 				return nil
 			}

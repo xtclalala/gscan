@@ -1,43 +1,38 @@
 package main
 
 import (
+	"github.com/urfave/cli/v2"
+	"github.com/xtclalala/infoK1t/internal/config"
 	"github.com/xtclalala/infoK1t/internal/output"
-	"github.com/xtclalala/ylog"
+	"go.uber.org/zap"
 	"os"
 	"runtime"
-
-	"github.com/urfave/cli/v2"
-)
-
-var (
-	target  string
-	targets []string
 )
 
 func main() {
 	SetCpuWorkerNum()
 
 	var flags = []cli.Flag{
-		&cli.UintFlag{
-			Name:     "logLevel",
-			Aliases:  []string{"ll"},
-			Value:    8,
-			Usage:    "set log level",
-			Required: false,
-		},
-		&cli.BoolFlag{
-			Name:     "color",
-			Aliases:  []string{"c"},
-			Value:    true,
-			Usage:    "usage log color",
-			Required: false,
-		},
-		&cli.UintFlag{
-			Name:     "logMode",
-			Aliases:  []string{"lm"},
+		&cli.StringFlag{
+			Name:     "mode",
+			Aliases:  []string{"m"},
 			Usage:    "output log mode",
 			Required: false,
-			Value:    1,
+			Value:    "console",
+		},
+		&cli.StringFlag{
+			Name:     "file",
+			Aliases:  []string{"f"},
+			Usage:    "output file path",
+			Required: false,
+			Value:    "",
+		},
+		&cli.StringFlag{
+			Name:     "Gateway IP",
+			Aliases:  []string{"g"},
+			Usage:    "current network gateway ip",
+			Required: false,
+			Value:    "",
 		},
 	}
 	app := &cli.App{
@@ -49,25 +44,39 @@ func main() {
 			identify,
 			probe,
 			ping,
+			subDomain,
 		},
 		Before: func(c *cli.Context) error {
-			var err error
-			output.SetUseColor(c.Bool("color"))
-			err = output.SetLogLevel(ylog.LogLevel(c.Uint("logLevel")))
-			output.SetColor()
-			output.AddTime()
-			if err != nil {
-				ylog.WithField("command", "main").Errorf(err.Error())
-				return err
-			}
-
+			// init logger
+			output.InitLogger(
+				func() []string {
+					outs := []string{"stdout"}
+					if f := c.String("file"); f != "" {
+						outs = append(outs, f)
+					}
+					outs = append(outs, config.GetOptions().Logger.File...)
+					return outs
+				}, func() string {
+					if mode := c.String("mode"); mode != "" {
+						return mode
+					}
+					return config.GetOptions().Logger.Mode
+				}, func() (level zap.AtomicLevel, dev bool) {
+					dev = config.IsDev()
+					if dev {
+						level = zap.NewAtomicLevelAt(zap.DebugLevel)
+						return
+					}
+					level = zap.NewAtomicLevelAt(zap.InfoLevel)
+					return
+				})
 			return nil
 		},
 	}
 
 	err := app.Run(os.Args)
 	if err != nil {
-		ylog.WithField("command", "main").Fatalf(err.Error())
+		output.GetLogger().Fatal(err.Error())
 	}
 }
 

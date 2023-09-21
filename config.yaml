@@ -1,0 +1,17 @@
+probe:
+
+ping:
+
+Logger:
+  mode: "console"
+
+gateway: 0
+active: "dev"
+
+dns:
+  servers:
+      - "223.5.5.5"
+      - "223.6.6.6"
+      - "119.29.29.29"
+      - "182.254.116.116"
+      - "114.114.114.115"

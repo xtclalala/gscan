@@ -4,36 +4,24 @@ import (
 	"context"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
-	"github.com/xtclalala/ylog"
+	identify "github.com/xtclalala/infoK1t/internal/id"
+	"github.com/zoumo/goset"
 	"net"
 )
 
-type DnsOptionFunc[T any] func(protocol *DnsProtocol[T])
+type DnsOptionFunc func(protocol *DnsProtocol)
 
-func WithDnsResolvers[T any](ips ...string) DnsOptionFunc[T] {
-	resolvers := []string{
-		"223.5.5.5",
-		"223.6.6.6",
-		"119.29.29.29",
-		"182.254.116.116",
-		"114.114.114.115",
-	}
-	var rs = make([]string, 0, len(resolvers)+len(ips))
-	rs = append(rs, resolvers...)
-	rs = append(rs, ips...)
-	return func(protocol *DnsProtocol[T]) {
-		protocol.DnsResolvers = rs
+func WithDnsResolvers(ips ...string) DnsOptionFunc {
+	return func(protocol *DnsProtocol) {
+		protocol.DnsResolvers = goset.NewSafeSetFromStrings(ips).ToStrings()
 	}
 }
 
-func NewDnsProtocol[T any](c context.Context, cancel context.CancelFunc, srcPort int, optionFunc ...DnsOptionFunc[T]) *DnsProtocol[T] {
-	var p = &DnsProtocol[T]{
-		Ctx:          c,
-		Cancel:       cancel,
-		Cache:        map[string]DnsInfo{},
-		DnsTable:     make(chan DnsInfo),
-		SrcPort:      srcPort,
+func NewDnsProtocol(optionFunc ...DnsOptionFunc) *DnsProtocol {
+	var p = &DnsProtocol{
+		DnsTable:     make(chan *DnsInfo),
 		DnsResolvers: []string{},
+		Cache:        make(map[string]*DnsInfo, 1000),
 	}
 
 	for _, f := range optionFunc {
@@ -42,61 +30,49 @@ func NewDnsProtocol[T any](c context.Context, cancel context.CancelFunc, srcPort
 	return p
 }
 
-type DnsProtocol[T any] struct {
-	BaseProtocol
-	hostCh       chan T
+type DnsProtocol struct {
+	EthernetProtocol
+	Ip4Protocol
+	UdpProtocol
+	HostCh       [][]byte
 	DnsResolvers []string
-	Cache        map[string]DnsInfo
-	DnsTable     chan DnsInfo
+	DnsTable     chan *DnsInfo
+	Cache        map[string]*DnsInfo
 	Ctx          context.Context
 	Cancel       context.CancelFunc
-	SrcPort      int
+	Err          error
 }
 
-func (s *DnsProtocol[T]) BuildSendPacket() <-chan []byte {
+func (s *DnsProtocol) BuildSendPacket(ctx context.Context, f func(config *DnsProtocol)) <-chan []byte {
+	f(s)
+	s.Ctx, s.Cancel = context.WithCancel(ctx)
 	var sendCh = make(chan []byte)
 
 	go func(sendCh chan []byte) {
 		var (
 			opt    gopacket.SerializeOptions
 			buffer gopacket.SerializeBuffer
-			err    error
-			eth    = &layers.Ethernet{}
-			ip     = &layers.IPv4{}
-			udp    = &layers.UDP{}
+			eth    *layers.Ethernet
+			ip     *layers.IPv4
+			udp    *layers.UDP
 			dns    = &layers.DNS{}
 		)
 		defer close(sendCh)
 
-		eth = s.BaseProtocol.Ethernet()
+		eth = s.BuildEthernet()
+		ip = s.BuildIp4(layers.IPProtocolUDP)
 
-		// 构建 ip 报
-		ip.Version = 4 // ip 版本
-		ip.IHL = 5
-		ip.TOS = 0
-		ip.Length = 0
-		ip.Checksum = 0
-		ip.Id = 0
-		ip.Flags = layers.IPv4DontFragment
-		ip.FragOffset = 0
-		ip.TTL = 255
-		ip.Protocol = layers.IPProtocolUDP
-		ip.SrcIP = s.SrcMAC
+		udp = s.BuildUdp(ip)
 
-		udp.SrcPort = layers.UDPPort(s.SrcPort)
-		udp.DstPort = layers.UDPPort(53)
-
-		dns.ID = 1
 		dns.QDCount = 1
 		dns.RD = true
 
 		opt.FixLengths = true
 		opt.ComputeChecksums = true
 
-		_ = udp.SetNetworkLayerForChecksum(ip)
-
 		buffer = gopacket.NewSerializeBuffer()
-		for _, host := range s.hostCh {
+		for _, host := range s.HostCh {
+			s.Cache[string(host)] = &DnsInfo{Host: string(host)}
 			dns.Questions = []layers.DNSQuestion{
 				{
 					Name:  host,
@@ -104,27 +80,22 @@ func (s *DnsProtocol[T]) BuildSendPacket() <-chan []byte {
 					Class: layers.DNSClassIN,
 				},
 			}
-
 			for _, dnsIp := range s.DnsResolvers {
-
-				// 构建 arp 报
+				// 构建 dns 报
 				ip.DstIP = net.ParseIP(dnsIp).To4()
-
+				id := identify.New("DNS")
+				dns.ID = id
 				// 形成 bytes
-				err = gopacket.SerializeLayers(buffer, opt, eth, ip, udp, dns)
-				if err != nil {
-					ylog.WithField("command", "dns").Errorf("build packet buffer is failed")
-					continue
+				s.Err = gopacket.SerializeLayers(buffer, opt, eth, ip, udp, dns)
+				if s.Err != nil {
+					return
 				}
 
 				sendCh <- buffer.Bytes()
-				err = buffer.Clear()
-				if err != nil {
-					ylog.WithField("command", "dns").Errorf("clear packet buffer is failed")
-					continue
+				s.Err = buffer.Clear()
+				if s.Err != nil {
+					return
 				}
-				s.Cache[string(host)] = NewDnsInfo(string(host))
-				ylog.WithField("command", "dns").Debugf("%s packet buffer is ok ", string(host))
 			}
 		}
 	}(sendCh)
@@ -132,13 +103,14 @@ func (s *DnsProtocol[T]) BuildSendPacket() <-chan []byte {
 	return sendCh
 }
 
-func (s *DnsProtocol[T]) Parse(packet gopacket.Packet) bool {
-	layer := packet.Layer(layers.LayerTypeDNS)
-	if layer == nil {
+func (s *DnsProtocol) Parse(packet gopacket.Packet) bool {
+	dnsLayer := packet.Layer(layers.LayerTypeDNS)
+
+	if dnsLayer == nil {
 		return false
 	}
 
-	dns := layer.(*layers.DNS)
+	dns := dnsLayer.(*layers.DNS)
 	if dns == nil {
 		return false
 	}
@@ -151,7 +123,22 @@ func (s *DnsProtocol[T]) Parse(packet gopacket.Packet) bool {
 	if dns.ANCount <= 0 {
 		return true
 	}
-	d := s.Cache[string(dns.Questions[0].Name)]
+	ip4Layer := packet.Layer(layers.LayerTypeIPv4)
+
+	if ip4Layer == nil {
+		return true
+	}
+
+	ip4 := ip4Layer.(*layers.IPv4)
+	if ip4 == nil {
+		return true
+	}
+	value, ok := s.haveHost(dns.Questions[0].Name)
+	if !ok {
+		return true
+	}
+
+	identify.Del("DNS", dns.ID)
 	for _, answer := range dns.Answers {
 		if answer.Class != layers.DNSClassIN {
 			continue
@@ -159,51 +146,48 @@ func (s *DnsProtocol[T]) Parse(packet gopacket.Packet) bool {
 		switch answer.Type {
 		case layers.DNSTypeA, layers.DNSTypeAAAA:
 			if answer.IP != nil {
-				s.DnsTable <- d.WithValue(answer.Type, answer.IP.String())
+				s.DnsTable <- WithValue(value, answer.Type, answer.IP.String(), ip4.SrcIP)
 			}
 		case layers.DNSTypeNS:
 			if answer.NS != nil {
-				s.DnsTable <- d.WithValue(answer.Type, string(answer.NS))
+				s.DnsTable <- WithValue(value, answer.Type, string(answer.NS), ip4.SrcIP)
 			}
 		case layers.DNSTypeCNAME:
 			if answer.CNAME != nil {
-				s.DnsTable <- d.WithValue(answer.Type, string(answer.CNAME))
+				s.DnsTable <- WithValue(value, answer.Type, string(answer.CNAME), ip4.SrcIP)
 			}
 		case layers.DNSTypePTR:
 			if answer.PTR != nil {
-				s.DnsTable <- d.WithValue(answer.Type, string(answer.PTR))
+				s.DnsTable <- WithValue(value, answer.Type, string(answer.PTR), ip4.SrcIP)
 			}
 		case layers.DNSTypeTXT:
 			if answer.TXT != nil {
-				s.DnsTable <- d.WithValue(answer.Type, string(answer.TXT))
+				s.DnsTable <- WithValue(value, answer.Type, string(answer.TXT), ip4.SrcIP)
 			}
 		}
 	}
-	delete(s.Cache, d.Host)
-	switch {
-	case len(s.Cache) == 0:
+
+	if identify.Length("DNS") == 0 {
 		s.Cancel()
 	}
-	ylog.WithField("command", "dns").Debugf(d.Host)
 	return true
 }
 
-func NewDnsInfo(host string) DnsInfo {
-	return DnsInfo{
-		Host: host,
-	}
+func (s *DnsProtocol) haveHost(host []byte) (*DnsInfo, bool) {
+	i, ok := s.Cache[string(host)]
+	return i, ok
 }
 
 type DnsInfo struct {
 	Host    string
 	DnsType layers.DNSType
 	Value   string
+	SrcIp   net.IP
 }
 
-func (s *DnsInfo) WithValue(dnsType layers.DNSType, value string) DnsInfo {
-	return DnsInfo{
-		Host:    s.Host,
-		Value:   value,
-		DnsType: dnsType,
-	}
+func WithValue(dns *DnsInfo, dnsType layers.DNSType, value string, srcIp net.IP) *DnsInfo {
+	dns.Value += "," + value
+	dns.DnsType = dnsType
+	dns.SrcIp = srcIp
+	return dns
 }

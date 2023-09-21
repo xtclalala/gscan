@@ -1,41 +1,54 @@
 package output
 
 import (
-	"errors"
-	"github.com/xtclalala/ylog"
-	"io"
-	"time"
+	"fmt"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 var (
-	ErrLogLevelTooBig   = errors.New("log level is too big")
-	ErrLogLevelTooSmall = errors.New("log level is too small")
+	logger *zap.Logger
+	err    error
 )
 
-// SetLogLevel 设置log输出等级
-func SetLogLevel(level ylog.LogLevel) (err error) {
-
-	if level >= ylog.DebugLevel {
-		return ErrLogLevelTooBig
+func InitLogger(
+	ioFunc func() []string,
+	EncodeFunc func() string,
+	appModeFunc func() (zap.AtomicLevel, bool)) {
+	encoderConfig := zapcore.EncoderConfig{
+		TimeKey:        "time",
+		LevelKey:       "level",
+		NameKey:        "logger",
+		CallerKey:      "caller",
+		MessageKey:     "msg",
+		StacktraceKey:  "stacktrace",
+		LineEnding:     zapcore.DefaultLineEnding,
+		EncodeLevel:    zapcore.CapitalColorLevelEncoder,                   // 大写编码器
+		EncodeTime:     zapcore.TimeEncoderOfLayout("2006-01-02 15:04:05"), // 时间格式
+		EncodeDuration: zapcore.SecondsDurationEncoder,
+		EncodeCaller:   zapcore.ShortCallerEncoder, // 编码器
 	}
-	ylog.SetLogLevel(level)
-	return
+
+	// 设置日志级别
+	level, dev := appModeFunc()
+	config := zap.Config{
+		Level:            level,                    // 日志级别
+		Development:      dev,                      // 开发模式，堆栈跟踪
+		Encoding:         EncodeFunc(),             // 输出格式 console 或 json
+		EncoderConfig:    encoderConfig,            // 编码器配置
+		InitialFields:    map[string]interface{}{}, // 初始化字段，如：添加一个服务器名称
+		OutputPaths:      ioFunc(),                 // 输出到指定文件 stdout（标准输出，正常颜色） stderr（错误输出，红色）
+		ErrorOutputPaths: []string{"stderr"},
+	}
+
+	// 构建日志
+	logger, err = config.Build()
+	if err != nil {
+		panic(fmt.Sprintf("log 初始化失败: %v", err))
+	}
+	logger.Info("初始化成功")
 }
 
-// AddOutputter  添加控制输出者
-func AddOutputter(o io.Writer) {
-	ylog.AddOuts(o)
-}
-
-// SetFormatter 设置输出方式
-func SetFormatter(formatter ylog.Formatter) {
-	ylog.SetFormatter(formatter)
-}
-
-func AddTime() {
-	ylog.AddHook(func(level ylog.LogLevel, entry *ylog.Entry) error {
-		entry.WithField("time", time.Now().Local().Format("2006-01-02 15:04:05"))
-		return nil
-	})
-
+func GetLogger() *zap.Logger {
+	return logger
 }

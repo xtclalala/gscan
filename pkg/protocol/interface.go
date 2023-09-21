@@ -1,8 +1,11 @@
 package protocol
 
-import "github.com/google/gopacket"
+import (
+	"context"
+	"github.com/google/gopacket"
+)
 
 type IProtocol[T any] interface {
-	BuildSendPacket() <-chan []byte
+	BuildSendPacket(ctx context.Context, handle func(T)) <-chan []byte
 	Parse(packet gopacket.Packet) bool
 }

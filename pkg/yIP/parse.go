@@ -12,6 +12,21 @@ var (
 	ErrIsNotIp       = errors.New("is not ip")
 )
 
+func ParseCIDR(ipStr string) (ips []int, err error) {
+	var (
+		ip    int
+		mask  int
+		ipNet *net.IPNet
+	)
+	_, ipNet, err = net.ParseCIDR(ipStr)
+	ip, err = Ip2int(ipNet.IP.To4().String())
+	if err != nil {
+		return
+	}
+	mask, _ = ipNet.Mask.Size()
+	return Parse(ip, mask)
+}
+
 func ParseString(ipStr, maskStr string) (ips []int, err error) {
 	var (
 		ip   int
@@ -80,12 +95,4 @@ func IsIp(ip string) bool {
 	}
 	return false
 
-}
-
-func GatewayIp(ip int, mask int) (int, error) {
-	ips, err := Parse(ip, mask)
-	if err != nil {
-		return -1, err
-	}
-	return ips[0], err
 }

@@ -2,12 +2,9 @@ package protocol
 
 import (
 	"context"
-	"github.com/xtclalala/ylog"
-
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/xtclalala/infoK1t/internal/id"
-	"net"
 	"sync"
 	"time"
 )
@@ -19,18 +16,15 @@ func WithBufferNumber(number int) IcmpOptionFunc {
 		number = 10
 	}
 	return func(protocol *IcmpProtocol) {
-		protocol.IcmpTable = make(chan IcmpInfo, number)
+		protocol.IcmpTable = make(chan *IcmpInfo, number)
 	}
 }
 
-func NewIcmpProtocol(c context.Context, cancel context.CancelFunc, optionFunc ...IcmpOptionFunc) *IcmpProtocol {
+func NewIcmpProtocol(optionFunc ...IcmpOptionFunc) *IcmpProtocol {
 	var p = &IcmpProtocol{
-		Ctx:            c,
-		Cancel:         cancel,
-		Cache:          map[uint16]IcmpInfo{},
-		PacketCount:    0,
-		CountIsRunning: false,
-		IcmpType:       layers.CreateICMPv4TypeCode(8, 0),
+		Cache:       map[uint16]*IcmpInfo{},
+		PacketCount: 0,
+		IcmpType:    layers.CreateICMPv4TypeCode(8, 0),
 	}
 
 	for _, f := range optionFunc {
@@ -40,46 +34,34 @@ func NewIcmpProtocol(c context.Context, cancel context.CancelFunc, optionFunc ..
 }
 
 type IcmpProtocol struct {
-	Cache          map[uint16]IcmpInfo
-	IcmpTable      chan IcmpInfo
-	PacketCount    uint
-	CountIsRunning bool
-	mx             sync.Mutex
-	Ctx            context.Context
-	Cancel         context.CancelFunc
-	IcmpType       layers.ICMPv4TypeCode
+	EthernetProtocol
+	Ip4Protocol
+	Cache       map[uint16]*IcmpInfo
+	IcmpTable   chan *IcmpInfo
+	PacketCount uint
+	mx          sync.Mutex
+	Ctx         context.Context
+	Cancel      context.CancelFunc
+	IcmpType    layers.ICMPv4TypeCode
+	DstIpCh     chan []byte
+	Err         error
 }
 
-func (s *IcmpProtocol) BuildSendPacket(srcIp, srcMac []byte, dstMac net.HardwareAddr, dstIpCh <-chan []byte) <-chan []byte {
+func (s *IcmpProtocol) BuildSendPacket(ctx context.Context, f func(protocol *IcmpProtocol)) <-chan []byte {
+	f(s)
 	var sendCh = make(chan []byte)
-
+	s.Ctx, s.Cancel = context.WithCancel(ctx)
 	go func(sendCh chan []byte) {
 		var (
 			opt    gopacket.SerializeOptions
 			buffer gopacket.SerializeBuffer
-			err    error
-			eth    = &layers.Ethernet{}
-			ip     = &layers.IPv4{}
+			eth    *layers.Ethernet
+			ip     *layers.IPv4
 			icmp   = &layers.ICMPv4{}
 		)
 		defer close(sendCh)
-
-		eth.SrcMAC = srcMac
-		eth.DstMAC = dstMac
-		eth.EthernetType = layers.EthernetTypeIPv4
-
-		// 构建 ip 报
-		ip.Version = 4 // ip 版本
-		ip.IHL = 5
-		ip.TOS = 0
-		ip.Length = 0
-		ip.Checksum = 0
-		ip.Id = 0
-		ip.Flags = layers.IPv4DontFragment
-		ip.FragOffset = 0
-		ip.TTL = 128
-		ip.Protocol = layers.IPProtocolICMPv4
-		ip.SrcIP = srcIp
+		eth = s.BuildEthernet()
+		ip = s.BuildIp4(layers.IPProtocolICMPv4)
 
 		icmp.TypeCode = s.IcmpType
 		buffer = gopacket.NewSerializeBuffer()
@@ -87,7 +69,7 @@ func (s *IcmpProtocol) BuildSendPacket(srcIp, srcMac []byte, dstMac net.Hardware
 		opt.FixLengths = true
 		opt.ComputeChecksums = true
 
-		for dstIp := range dstIpCh {
+		for dstIp := range s.DstIpCh {
 			i := NewIcmpInfo()
 			icmp.Id = i.Id
 			icmp.Seq = i.Seq
@@ -97,19 +79,15 @@ func (s *IcmpProtocol) BuildSendPacket(srcIp, srcMac []byte, dstMac net.Hardware
 			s.Cache[i.Id] = i
 			s.mx.Unlock()
 			// 形成 bytes
-			err = gopacket.SerializeLayers(buffer, opt, eth, ip, icmp)
-			if err != nil {
-				ylog.WithField("command", "icmp").Errorf("build packet buffer is failed: %s", err.Error())
-				continue
+			s.Err = gopacket.SerializeLayers(buffer, opt, eth, ip, icmp)
+			if s.Err != nil {
+				return
 			}
 			sendCh <- buffer.Bytes()
-			err = buffer.Clear()
-			if err != nil {
-				ylog.WithField("command", "icmp").Errorf("clear packet buffer is failed")
-				continue
+			s.Err = buffer.Clear()
+			if s.Err != nil {
+				return
 			}
-			ylog.WithField("command", "icmp").Debugf(string(dstIp))
-
 		}
 	}(sendCh)
 
@@ -129,22 +107,27 @@ func (s *IcmpProtocol) Parse(packet gopacket.Packet) bool {
 	if icmp.TypeCode == s.IcmpType {
 		return false
 	}
+
+	s.mx.Lock()
+	i, ok := s.Cache[icmp.Id]
+	delete(s.Cache, icmp.Id)
+	s.mx.Unlock()
+	if !ok {
+		return false
+	}
 	ipLayer := packet.Layer(layers.LayerTypeIPv4)
 	ip := ipLayer.(*layers.IPv4)
-	s.mx.Lock()
-	i := s.Cache[icmp.Id]
-	s.mx.Unlock()
+	s.Done()
+
 	i.WithEnd(ip.TTL, ip.SrcIP.String())
 	s.IcmpTable <- i
-	s.Done()
-	if s.CountIsRunning && s.PacketCount == 0 {
+	if s.PacketCount == 0 {
 		s.Cancel()
 	}
 	return true
 }
 
 func (s *IcmpProtocol) Add(c uint) {
-	s.CountIsRunning = true
 	s.mx.Lock()
 	defer s.mx.Unlock()
 	s.PacketCount += c
@@ -156,8 +139,8 @@ func (s *IcmpProtocol) Done() {
 	s.PacketCount -= 1
 }
 
-func NewIcmpInfo() IcmpInfo {
-	return IcmpInfo{
+func NewIcmpInfo() *IcmpInfo {
+	return &IcmpInfo{
 		Id:        id.New("icmp"),
 		Seq:       id.New("icmp"),
 		StartTime: time.Now(),
